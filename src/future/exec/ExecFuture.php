@@ -31,6 +31,9 @@ final class ExecFuture extends PhutilExecutableFuture {
   private $stdin        = null;
   private $closePipe    = true;
 
+  private $powershellXml    = false;
+  private $powershellStderr = null;
+
   private $stdoutPos    = 0;
   private $stderrPos    = 0;
   private $command      = null;
@@ -177,6 +180,19 @@ final class ExecFuture extends PhutilExecutableFuture {
    */
   public function setReadBufferSize($read_buffer_size) {
     $this->readBufferSize = $read_buffer_size;
+    return $this;
+  }
+
+
+  /**
+   * Enable parsing the nonsense XML crap that Powershell outputs to stderr,
+   * which wraps all standard error output as CLIXML.
+   *
+   * @param bool Whether this future should parse standard error as CLIXML.
+   * @return this
+   */
+  public function setPowershellXML($powershell_xml) {
+    $this->powershellXml = $powershell_xml;
     return $this;
   }
 
@@ -747,11 +763,27 @@ final class ExecFuture extends PhutilExecutableFuture {
     }
 
     if ($max_stderr_read_bytes > 0) {
-      $this->stderr .= $this->readAndDiscard(
-        $stderr,
-        $this->getStderrSizeLimit() - strlen($this->stderr),
-        'stderr',
-        $max_stderr_read_bytes);
+      if ($this->powershellXml) {
+        $this->powershellStderr .= $this->readAndDiscard(
+          $stderr,
+          $this->getStderrSizeLimit() - strlen($this->powershellStderr),
+          'stderr',
+          $max_stderr_read_bytes);
+
+        list($parsed_stderr, $stderr_taken) = $this->parsePowershellXML(
+          $this->powershellStderr);
+
+        $this->stderr .= $parsed_stderr;
+        $this->powershellStderr = substr(
+          $this->powershellStderr,
+          $stderr_taken);
+      } else {
+        $this->stderr .= $this->readAndDiscard(
+          $stderr,
+          $this->getStderrSizeLimit() - strlen($this->stderr),
+          'stderr',
+          $max_stderr_read_bytes);
+      }
     }
 
     $is_done = false;
@@ -806,6 +838,73 @@ final class ExecFuture extends PhutilExecutableFuture {
       return true;
     }
 
+  }
+
+
+  /**
+   * Parse the powershell XML and convert it into output for CLIXML.
+   */
+  public function parsePowershellXML($powershell_xml) {
+    $lines = phutil_split_lines($powershell_xml);
+
+    $result = '';
+    $consumed_characters = 0;
+    $previous_characters = 0;
+
+    // With CLIXML, each line contains XML, or the CLIXML start line.
+    for ($i = 0; $i < count($lines); $i++) {
+      $line = $lines[$i];
+
+      // Calculate how many characters we're consuming.
+      $previous_characters = $consumed_characters;
+      $consumed_characters += strlen($line);
+      while (
+        $consumed_characters < strlen($powershell_xml) && (
+          $powershell_xml[$consumed_characters] === "\r" ||
+          $powershell_xml[$consumed_characters] === "\n")) {
+
+        $consumed_characters += 1;
+      }
+
+      // CLIXML outputs "#< CLIXML" on the first line, so we discard it.
+      if (trim($line) === '#< CLIXML') {
+        continue;
+      }
+
+      // Try and load the line as XML.  Because other processes can write to
+      // standard error, it can be random output from other processes (yay!)
+      $xml = @simplexml_load_string($line);
+      if ($xml === false) {
+
+        // Check to see if this is the last line; if it is, we might not be
+        // able to parse it because it's not fully read yet.
+        if ($i === count($lines) - 1) {
+          return array($result, $previous_characters);
+        }
+
+        // If we've fully read this line, and we still can't read it, then it
+        // might be output from another program, so just return it as part
+        // of the results.
+        $result .= $line;
+        continue;
+      }
+
+      $xml->registerXPathNamespace(
+        'ns',
+        'http://schemas.microsoft.com/powershell/2004/04');
+
+      $error_lines = $xml->xpath('//ns:S[@S=\'Error\']');
+      foreach ($error_lines as $error) {
+
+        // Microsoft; land of the completely made-up standards.
+        $error = str_replace('_x000D_', "\r", $error);
+        $error = str_replace('_x000A_', "\n", $error);
+
+        $result .= $error;
+      }
+    }
+
+    return array($result, $consumed_characters);
   }
 
 

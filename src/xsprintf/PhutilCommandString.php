@@ -7,6 +7,8 @@ final class PhutilCommandString extends Phobject {
 
   const MODE_DEFAULT = 'default';
   const MODE_POWERSHELL = 'powershell';
+  const MODE_WINDOWSCMD = 'windowscmd';
+  const MODE_BASH = 'bash';
 
   public function __construct(array $argv) {
     $this->argv = $argv;
@@ -51,6 +53,10 @@ final class PhutilCommandString extends Phobject {
         return escapeshellarg($value);
       case self::MODE_POWERSHELL:
         return self::escapePowershell($value);
+      case self::MODE_WINDOWSCMD:
+        return self::escapeWindowsCMD($value);
+      case self::MODE_BASH:
+        return self::escapeBash($value);
       default:
         throw new Exception(pht('Unknown escaping mode!'));
     }
@@ -80,6 +86,26 @@ final class PhutilCommandString extends Phobject {
     $value = str_replace('$', '`$', $value);
 
     return '"'.$value.'"';
+  }
+
+  private static function escapeWindowsCMD($value) {
+
+    // Just replace " with \".  The Windows command prompt is seriously
+    // broken in terms of escaping parameters, so there's no sane way
+    // to actually escape here.
+    $value = str_replace('"', '\\"', $value);
+
+    return '"'.$value.'"';
+  }
+
+  private static function escapeBash($value) {
+
+    // We put everything in single quotes, except that you can't use single
+    // quotes at all inside a single quoted string in Bash.  Instead, we change
+    // over to double quotes for single quotes.
+    $value = str_replace('\'', '\'"\'"\'', $value);
+
+    return '\''.$value.'\'';
   }
 
 }
